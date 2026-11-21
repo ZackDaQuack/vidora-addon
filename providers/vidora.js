@@ -3,6 +3,7 @@
 //        url = HLS master (audio + variants) on shegu.hls.lol/m/<token>.m3u8
 // Logs start with [Vidora].
 
+var TEST_VARIANT = true; // also list the 1080p video playlist on its own (no audio) to test header handling
 var DEBUG = true; // also fetches the master once and logs its status; set false when it works
 
 var BASE = "https://vidora.ac";
@@ -125,6 +126,30 @@ async function debugMaster(url) {
     await probe("segment with headers", absUrl(video, seg), h);
 }
 
+// Test stream: the best <=1080p variant playlist itself (host totallyacdn.cc), video only.
+async function variantStream(masterUrl) {
+    try {
+        var res = await fetch(masterUrl, { headers: STREAM_HEADERS });
+        var text = await res.text();
+        if (res.status !== 200) return null;
+        var lines = text.split(/\r?\n/);
+        var best = null;
+        var bestH = 0;
+        for (var i = 0; i < lines.length; i++) {
+            if (lines[i].indexOf("#EXT-X-STREAM-INF") !== 0) continue;
+            var m = /RESOLUTION=\d+x(\d+)/.exec(lines[i]);
+            var h = m ? parseInt(m[1], 10) : 0;
+            var u = (lines[i + 1] || "").trim();
+            if (u && h <= 1080 && h > bestH) { best = u; bestH = h; }
+        }
+        if (!best) return null;
+        return makeStream(absUrl(masterUrl, best), bestH, "video-only (test)");
+    } catch (e) {
+        console.log("[Vidora] variantStream failed: " + e);
+        return null;
+    }
+}
+
 // TV URL shapes are a guess: try a few, log which one answers.
 async function viaShegu(tmdbId, mediaType, season, episode) {
     var candidates = [];
@@ -141,7 +166,12 @@ async function viaShegu(tmdbId, mediaType, season, episode) {
             if (data && data.found && data.url) {
                 console.log("[Vidora] shegu OK, maxHeight=" + data.maxHeight);
                 if (DEBUG) await debugMaster(data.url);
-                return [makeStream(data.url, data.maxHeight, "")];
+                var out = [makeStream(data.url, data.maxHeight, "")];
+                if (TEST_VARIANT) {
+                    var vs = await variantStream(data.url);
+                    if (vs) out.push(vs);
+                }
+                return out;
             }
             if (data) console.log("[Vidora] shegu: found=" + data.found);
         } catch (e) {
