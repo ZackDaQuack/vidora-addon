@@ -3,8 +3,12 @@
 //        url = HLS master (audio + variants) on shegu.hls.lol/m/<token>.m3u8
 // Logs start with [Vidora].
 
-var TEST_VARIANT = true; // also list the 1080p video playlist on its own (no audio) to test header handling
-var DEBUG = true; // also fetches the master once and logs its status; set false when it works
+var TEST_VARIANT = false; // also list the 1080p video playlist on its own (no audio) to test header handling
+var DEBUG = false; // also fetches the master once and logs its status; set false when it works
+
+// If set, streams go through vidora_proxy.py (which adds the Origin/Referer headers the CDN
+// checks), so the player needs no custom headers. Example: "http://192.168.1.50:8787"
+var PROXY_BASE = "";
 
 var BASE = "https://vidora.ac";
 var RESOLVE = "https://shegu.hls.lol";
@@ -150,12 +154,21 @@ async function variantStream(masterUrl) {
     }
 }
 
-// TV URL shapes are a guess: try a few, log which one answers.
+// TV path (seen in the player): /resolve/tv/<a>/<b>/<tmdbId>. For S1E1 we can't tell whether
+// <a> is the season or the episode, so we try season/episode first and verify the response's
+// season/episode fields, then fall back to the swapped order.
+function matchesEpisode(data, season, episode) {
+    if (data.season === undefined || data.episode === undefined) return true;
+    return String(data.season) === String(season) && String(data.episode) === String(episode);
+}
+
 async function viaShegu(tmdbId, mediaType, season, episode) {
     var candidates = [];
     if (mediaType === "tv") {
-        candidates.push(RESOLVE + "/resolve/tv/" + tmdbId + "/" + season + "/" + episode);
-        candidates.push(RESOLVE + "/resolve?tmdbId=" + tmdbId + "&type=tv&season=" + season + "&episode=" + episode);
+        candidates.push(RESOLVE + "/resolve/tv/" + season + "/" + episode + "/" + tmdbId);
+        if (String(season) !== String(episode)) {
+            candidates.push(RESOLVE + "/resolve/tv/" + episode + "/" + season + "/" + tmdbId);
+        }
     } else {
         candidates.push(RESOLVE + "/resolve/movie/" + tmdbId);
     }
@@ -164,6 +177,10 @@ async function viaShegu(tmdbId, mediaType, season, episode) {
         try {
             var data = await getJson(candidates[i]);
             if (data && data.found && data.url) {
+                if (mediaType === "tv" && !matchesEpisode(data, season, episode)) {
+                    console.log("[Vidora] wrong episode returned (S" + data.season + "E" + data.episode + "), trying next path");
+                    continue;
+                }
                 console.log("[Vidora] shegu OK, maxHeight=" + data.maxHeight);
                 if (DEBUG) await debugMaster(data.url);
                 var out = [makeStream(data.url, data.maxHeight, "")];
@@ -201,6 +218,20 @@ async function viaVidbox(tmdbId, mediaType, season, episode) {
 
 async function getStreams(tmdbId, mediaType, season, episode) {
     console.log("[Vidora] getStreams called " + tmdbId + " " + mediaType + " " + season + " " + episode);
+
+    if (PROXY_BASE) {
+        var root = PROXY_BASE.replace(/\/+$/, "");
+        var path = mediaType === "tv"
+        ? "/tv/" + tmdbId + "/" + (season || 1) + "/" + (episode || 1) + "/index.m3u8"
+        : "/movie/" + tmdbId + "/index.m3u8";
+        console.log("[Vidora] using proxy " + root + path);
+        return [{
+            name: "Vidora",
+            title: "Vidora (via local proxy)",
+            url: root + path,
+            quality: "Auto"
+        }];
+    }
     var s = season || 1;
     var e = episode || 1;
     try {
