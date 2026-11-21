@@ -1,19 +1,29 @@
 // Vidora scraper for Nuvio (QuickJS).
-// Chain (confirmed for movies):
-//   shegu.hls.lol/resolve/movie/<tmdbId>  ->  { found, url, maxHeight, expiresAt }
-//   url = https://shegu.hls.lol/m/<token>.m3u8  (HLS master with audio + variants)
-// Watch the app's logs for lines starting with [Vidora].
+// Chain: shegu.hls.lol/resolve/movie/<tmdbId> -> { found, url, maxHeight }
+//        url = HLS master (audio + variants) on shegu.hls.lol/m/<token>.m3u8
+// Logs start with [Vidora].
+
+var DEBUG = true; // also fetches the master once and logs its status; set false when it works
 
 var BASE = "https://vidora.ac";
 var RESOLVE = "https://shegu.hls.lol";
-var VIDBOX = "https://stream.hls.lol/vidbox"; // fallback, returns transcode.cfd proxy URLs
-var UA = "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Mobile Safari/537.36";
+var VIDBOX = "https://stream.hls.lol/vidbox"; // fallback (transcode.cfd proxy URLs)
+
+// Same UA/headers as the curl + mpv runs that worked.
+var UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/156.0.0.0 Safari/537.36";
 
 var API_HEADERS = {
     "Accept": "*/*",
+    "Accept-Language": "en-US,en;q=0.9",
     "Origin": BASE,
     "Referer": BASE + "/",
-    "User-Agent": UA
+    "User-Agent": UA,
+    "sec-ch-ua": "\"Not:A-Brand\";v=\"8\", \"Chromium\";v=\"156\", \"Google Chrome\";v=\"156\"",
+    "sec-ch-ua-mobile": "?0",
+    "sec-ch-ua-platform": "\"Linux\"",
+    "sec-fetch-dest": "empty",
+    "sec-fetch-mode": "cors",
+    "sec-fetch-site": "cross-site"
 };
 
 var STREAM_HEADERS = {
@@ -22,15 +32,23 @@ var STREAM_HEADERS = {
     "User-Agent": UA
 };
 
+function okStatus(res) {
+    // Don't rely on res.ok: some QuickJS fetch polyfills don't implement it.
+    return res.status >= 200 && res.status < 300;
+}
+
 async function getJson(url) {
     var res = await fetch(url, { headers: API_HEADERS });
     var text = await res.text();
     console.log("[Vidora] GET " + url + " -> " + res.status + " (" + text.length + " bytes)");
-    if (!res.ok) return null;
+    if (!okStatus(res)) {
+        console.log("[Vidora] body: " + text.slice(0, 200));
+        return null;
+    }
     try {
         return JSON.parse(text);
     } catch (e) {
-        console.log("[Vidora] bad JSON from " + url + ": " + e);
+        console.log("[Vidora] bad JSON: " + e + " body: " + text.slice(0, 200));
         return null;
     }
 }
@@ -39,14 +57,24 @@ function makeStream(url, height, label) {
     var q = height ? height + "p" : "Auto";
     return {
         name: "Vidora",
-        title: "Vidora " + (label || "") + " " + q,
+        title: ("Vidora " + (label || "") + " " + q).replace("  ", " "),
         url: url,
         quality: q,
         headers: STREAM_HEADERS
     };
 }
 
-// Primary: shegu resolver. The TV URL shape is a GUESS, so we try a few and log which works.
+async function debugMaster(url) {
+    try {
+        var res = await fetch(url, { headers: STREAM_HEADERS });
+        var text = await res.text();
+        console.log("[Vidora] master check -> " + res.status + ", starts: " + text.slice(0, 20).replace(/\n/g, " "));
+    } catch (e) {
+        console.log("[Vidora] master check failed: " + e);
+    }
+}
+
+// TV URL shapes are a guess: try a few, log which one answers.
 async function viaShegu(tmdbId, mediaType, season, episode) {
     var candidates = [];
     if (mediaType === "tv") {
@@ -61,8 +89,10 @@ async function viaShegu(tmdbId, mediaType, season, episode) {
             var data = await getJson(candidates[i]);
             if (data && data.found && data.url) {
                 console.log("[Vidora] shegu OK, maxHeight=" + data.maxHeight);
+                if (DEBUG) await debugMaster(data.url);
                 return [makeStream(data.url, data.maxHeight, "")];
             }
+            if (data) console.log("[Vidora] shegu: found=" + data.found);
         } catch (e) {
             console.log("[Vidora] shegu error: " + e);
         }
@@ -70,17 +100,18 @@ async function viaShegu(tmdbId, mediaType, season, episode) {
     return [];
 }
 
-// Fallback: vidbox returns { sources: { Name: { url, type, label } } }
 async function viaVidbox(tmdbId, mediaType, season, episode) {
     var url = VIDBOX + "?tmdbId=" + tmdbId + "&type=" + (mediaType === "tv" ? "tv" : "movie");
     if (mediaType === "tv") url += "&season=" + season + "&episode=" + episode;
     try {
         var data = await getJson(url);
         var sources = data && data.sources ? data.sources : {};
-        return Object.keys(sources).map(function (k) {
+        var out = [];
+        Object.keys(sources).forEach(function (k) {
             var s = sources[k];
-            return s && s.url ? makeStream(s.url, null, "(" + (s.server || k) + ")") : null;
-        }).filter(Boolean);
+            if (s && s.url) out.push(makeStream(s.url, null, "(" + (s.server || k) + ")"));
+        });
+            return out;
     } catch (e) {
         console.log("[Vidora] vidbox error: " + e);
         return [];
@@ -88,7 +119,7 @@ async function viaVidbox(tmdbId, mediaType, season, episode) {
 }
 
 async function getStreams(tmdbId, mediaType, season, episode) {
-    console.log("[Vidora] getStreams called", tmdbId, mediaType, season, episode);
+    console.log("[Vidora] getStreams called " + tmdbId + " " + mediaType + " " + season + " " + episode);
     var s = season || 1;
     var e = episode || 1;
     try {
