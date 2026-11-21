@@ -26,10 +26,15 @@ var API_HEADERS = {
     "sec-fetch-site": "cross-site"
 };
 
+// Mirrors the mpv run that played the stream (Referer, Origin, UA, Sec-Fetch-*).
 var STREAM_HEADERS = {
+    "Accept": "*/*",
     "Origin": BASE,
     "Referer": BASE + "/",
-    "User-Agent": UA
+    "User-Agent": UA,
+    "Sec-Fetch-Mode": "cors",
+    "Sec-Fetch-Site": "cross-site",
+    "Sec-Fetch-Dest": "empty"
 };
 
 function okStatus(res) {
@@ -64,14 +69,60 @@ function makeStream(url, height, label) {
     };
 }
 
-async function debugMaster(url) {
+async function probe(label, url, headers) {
     try {
-        var res = await fetch(url, { headers: STREAM_HEADERS });
+        var res = await fetch(url, { headers: headers });
         var text = await res.text();
-        console.log("[Vidora] master check -> " + res.status + ", starts: " + text.slice(0, 20).replace(/\n/g, " "));
+        console.log("[Vidora] " + label + " -> " + res.status + " (" + text.length + " bytes)");
+        return { status: res.status, text: text };
     } catch (e) {
-        console.log("[Vidora] master check failed: " + e);
+        console.log("[Vidora] " + label + " failed: " + e);
+        return null;
     }
+}
+
+function absUrl(base, u) {
+    if (/^https?:\/\//i.test(u)) return u;
+        return base.replace(/\?.*$/, "").replace(/[^\/]*$/, "") + u;
+}
+
+function firstLineAfter(text, marker) {
+    var lines = text.split(/\r?\n/);
+    for (var i = 0; i < lines.length; i++) {
+        if (lines[i].indexOf(marker) === 0) return (lines[i + 1] || "").trim();
+    }
+    return null;
+}
+
+function firstSegment(text) {
+    var lines = text.split(/\r?\n/);
+    for (var i = 0; i < lines.length; i++) {
+        var l = lines[i].trim();
+        if (l && l.charAt(0) !== "#") return l;
+    }
+    return null;
+}
+
+// Debug chain: master -> variant playlist (with and without Referer) -> first segment.
+// This shows what the phone sees, and what a player that drops Referer would see.
+async function debugMaster(url) {
+    var m = await probe("master", url, STREAM_HEADERS);
+    if (!m || m.status !== 200) return;
+
+    var video = firstLineAfter(m.text, "#EXT-X-STREAM-INF");
+    if (!video) { console.log("[Vidora] no variant found in master"); return; }
+    video = absUrl(url, video);
+
+    await probe("variant WITHOUT referer", video, { "User-Agent": UA });
+    var v = await probe("variant with headers", video, STREAM_HEADERS);
+    if (!v || v.status !== 200) return;
+
+    var seg = firstSegment(v.text);
+    if (!seg) { console.log("[Vidora] no segment found in variant"); return; }
+    var h = {};
+    Object.keys(STREAM_HEADERS).forEach(function (k) { h[k] = STREAM_HEADERS[k]; });
+    h.Range = "bytes=0-1023";
+    await probe("segment with headers", absUrl(video, seg), h);
 }
 
 // TV URL shapes are a guess: try a few, log which one answers.
