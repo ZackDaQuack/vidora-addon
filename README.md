@@ -19,7 +19,7 @@ If you want something that works reliably, use a debrid service. This is the bud
 1. In Nuvio, open the plugin settings and add this repository URL:
 
    ```
-   https://raw.githubusercontent.com/ZackDaQuack/vidora-addon/refs/heads/main/manifest.json
+   https://raw.githubusercontent.com/ZackDaQuack/vidora-for-nuvio/refs/heads/main/manifest.json
    ```
 
 2. Enable the scraper, then open a movie and look for **Vidora** in the stream list.
