@@ -3,16 +3,19 @@
 //        url = HLS master (audio + variants); its playlists and segments live on totallyacdn.cc
 // Logs start with [Vidora]. The version tag shows which file Nuvio is really running.
 
-var VERSION = "v8";
+var VERSION = "v9";
 var SHOW_VERSION = true;     // append the version to the stream title (turn off once stable)
-var DEBUG = true;            // log variant/segment probes made from the phone
+var DEBUG = false;           // log variant/segment probes made from the phone (adds ~3 requests)
 var TEST_VARIANT = false;    // extra video-only entry for header experiments
+var TIME_BUDGET_MS = 8000;   // stop re-resolving after this long
 var MAX_RESOLVE_TRIES = 3;   // re-resolve when the master points at an unexpected host
 var GOOD_HOSTS = ["totallyacdn.cc", "shegu.hls.lol"];
 
 // If set, streams go through vidora_proxy.py (adds the Origin/Referer headers the CDN checks).
 // Example: "http://192.168.1.50:8787"
 var PROXY_BASE = "";
+
+var T0 = 0;                  // start time of the current getStreams call
 
 var BASE = "https://vidora.ac";
 var RESOLVE = "https://shegu.hls.lol";
@@ -223,6 +226,10 @@ async function viaShegu(tmdbId, mediaType, season, episode) {
     for (var i = 0; i < candidates.length; i++) {
         var last = null;
         for (var t = 1; t <= MAX_RESOLVE_TRIES; t++) {
+            if (t > 1 && Date.now() - T0 > TIME_BUDGET_MS) {
+                console.log("[Vidora] time budget used, stopping retries");
+                break;
+            }
             var data = null;
             try {
                 data = await resolveOnce(candidates[i], mediaType, season, episode);
@@ -269,26 +276,38 @@ async function viaVidbox(tmdbId, mediaType, season, episode) {
 }
 
 async function getStreams(tmdbId, mediaType, season, episode) {
-    console.log("[Vidora] " + VERSION + " getStreams called " + tmdbId + " " + mediaType + " " + season + " " + episode);
+    T0 = Date.now();
+    var id = String(tmdbId).replace(/^tmdb:/i, "");
+    var type = String(mediaType || "").toLowerCase();
+    var hasEp = season !== undefined && season !== null && season !== "" &&
+    episode !== undefined && episode !== null && episode !== "";
+    // Nuvio may say "tv" or "series" (Stremio's word); with no type but an episode number it's a show.
+    var kind = (type === "tv" || type === "series" || type === "show" || type === "episode" ||
+    (type !== "movie" && hasEp)) ? "tv" : "movie";
+
+    console.log("[Vidora] " + VERSION + " getStreams called id=" + id + " (" + typeof tmdbId + ") type=" + mediaType +
+    " season=" + season + " episode=" + episode + " -> " + kind);
+    if (/^tt\d+/.test(id)) console.log("[Vidora] warning: got an IMDb id, the resolver needs a TMDB id");
+
+    var s = (season === undefined || season === null || season === "") ? 1 : season;
+    var e = (episode === undefined || episode === null || episode === "") ? 1 : episode;
 
     if (PROXY_BASE) {
         var root = PROXY_BASE.replace(/\/+$/, "");
-        var path = mediaType === "tv"
-        ? "/tv/" + tmdbId + "/" + (season || 1) + "/" + (episode || 1) + "/index.m3u8"
-        : "/movie/" + tmdbId + "/index.m3u8";
+        var path = kind === "tv"
+        ? "/tv/" + id + "/" + s + "/" + e + "/index.m3u8"
+        : "/movie/" + id + "/index.m3u8";
         console.log("[Vidora] using proxy " + root + path);
         return [{ name: "Vidora", title: "Vidora (via local proxy)", url: root + path, quality: "Auto" }];
     }
 
-    var s = season || 1;
-    var e = episode || 1;
     try {
-        var streams = await viaShegu(tmdbId, mediaType, s, e);
+        var streams = await viaShegu(id, kind, s, e);
         if (streams.length === 0) {
             console.log("[Vidora] shegu gave nothing, trying vidbox");
-            streams = await viaVidbox(tmdbId, mediaType, s, e);
+            streams = await viaVidbox(id, kind, s, e);
         }
-        console.log("[Vidora] returning " + streams.length + " stream(s)");
+        console.log("[Vidora] returning " + streams.length + " stream(s) in " + (Date.now() - T0) + " ms");
         return streams;
     } catch (err) {
         console.log("[Vidora] error: " + err);
