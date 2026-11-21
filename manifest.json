@@ -1,11 +1,11 @@
 {
-  "name": "Vidora Probe",
+  "name": "Vidora",
   "version": "0.0.1",
   "scrapers": [
     {
       "id": "vidora",
-      "name": "Vidora (probe)",
-      "description": "Tests whether vidora.ac exposes direct stream URLs",
+      "name": "Vidora",
+      "description": "Grabs stream links from Vidora",
       "version": "0.0.1",
       "filename": "providers/vidora.js",
       "supportedTypes": ["movie", "tv"],
