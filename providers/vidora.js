@@ -1,89 +1,51 @@
-// Vidora probe scraper for Nuvio (QuickJS).
-// Goal: find out whether vidora.ac exposes direct stream URLs that a scraper can use.
+// Vidora scraper for Nuvio (QuickJS).
+// Calls the same endpoint the vidora.ac player uses and returns its HLS sources.
 // Watch the app's logs for lines starting with [Vidora].
 
+var API = "https://stream.hls.lol/vidbox";
 var BASE = "https://vidora.ac";
-var UA = "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Mobile Safari/537.36";
-
-var MEDIA_RE = /https?:\\?\/\\?\/[^"'\s\\<>]+?\.(?:m3u8|mp4)(?:\?[^"'\s\\<>]*)?/gi;
-var API_RE = /(?:https?:\\?\/\\?\/[^"'\s\\<>]+)?\\?\/api\\?\/[^"'\s\\<>]*/gi;
-
-function unescapeUrl(u) {
-    return u.replace(/\\\//g, "/").replace(/\\u0026/g, "&").replace(/&amp;/g, "&");
-}
-
-function uniq(arr) {
-    var seen = {};
-    var out = [];
-    for (var i = 0; i < arr.length; i++) {
-        if (!seen[arr[i]]) { seen[arr[i]] = true; out.push(arr[i]); }
-    }
-    return out;
-}
-
-function findAll(re, text) {
-    var m = text.match(re) || [];
-    return uniq(m.map(unescapeUrl));
-}
-
-async function get(url, referer) {
-    var res = await fetch(url, {
-        headers: { "User-Agent": UA, "Referer": referer || BASE + "/", "Accept": "*/*" }
-    });
-    var text = await res.text();
-    console.log("[Vidora] GET " + url + " -> " + res.status + " (" + text.length + " bytes)");
-    return text;
-}
+var UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/156.0.0.0 Safari/537.36";
 
 async function getStreams(tmdbId, mediaType, season, episode) {
+    console.log("[Vidora] getStreams called", tmdbId, mediaType, season, episode);
     try {
-        var embedUrl = mediaType === "tv"
-        ? BASE + "/tv/" + tmdbId + "/" + season + "/" + episode
-        : BASE + "/movie/" + tmdbId;
-
-        var html = await get(embedUrl);
-        var media = findAll(MEDIA_RE, html);
-        var apis = findAll(API_RE, html);
-
-        // Also check same-origin scripts (player logic often lives there)
-        var scriptSrcs = [];
-        var scriptRe = /<script[^>]+src=["']([^"']+)["']/gi;
-        var m;
-        while ((m = scriptRe.exec(html)) !== null) scriptSrcs.push(m[1]);
-        scriptSrcs = uniq(scriptSrcs).slice(0, 4);
-
-        for (var i = 0; i < scriptSrcs.length; i++) {
-            var src = scriptSrcs[i];
-            if (src.indexOf("//") === 0) src = "https:" + src;
-                else if (src.charAt(0) === "/") src = BASE + src;
-                if (src.indexOf(BASE) !== 0) continue; // same-origin only
-                try {
-                    var js = await get(src, embedUrl);
-                    media = uniq(media.concat(findAll(MEDIA_RE, js)));
-                    apis = uniq(apis.concat(findAll(API_RE, js)));
-                } catch (e) {
-                    console.log("[Vidora] script fetch failed: " + src + " " + e);
-                }
+        var url = API + "?tmdbId=" + tmdbId + "&type=" + (mediaType === "tv" ? "tv" : "movie");
+        // NOTE: the season/episode parameter names are a guess. Confirm them in
+        // the Network tab by playing a TV episode on vidora.ac.
+        if (mediaType === "tv") {
+            url += "&season=" + season + "&episode=" + episode;
         }
 
-        console.log("[Vidora] iframes in page: " + ((html.match(/<iframe/gi) || []).length));
-        console.log("[Vidora] API-looking paths: " + JSON.stringify(apis.slice(0, 10)));
-        console.log("[Vidora] direct media URLs: " + JSON.stringify(media.slice(0, 10)));
-
-        if (media.length === 0) {
-            console.log("[Vidora] No direct streams in static HTML/JS. Stream is likely fetched at runtime via an API or token. Check the API paths above.");
-            return [];
-        }
-
-        return media.map(function (url, idx) {
-            return {
-                name: "Vidora (probe)",
-                         title: "Vidora " + (url.indexOf(".m3u8") !== -1 ? "HLS" : "MP4") + " #" + (idx + 1),
-                         url: url,
-                         quality: "Unknown",
-                         headers: { "Referer": BASE + "/", "User-Agent": UA }
-            };
+        var res = await fetch(url, {
+            headers: {
+                "Accept": "*/*",
+                "Origin": BASE,
+                "Referer": BASE + "/",
+                "User-Agent": UA
+            }
         });
+        var text = await res.text();
+        console.log("[Vidora] GET " + url + " -> " + res.status + " (" + text.length + " bytes)");
+        if (!res.ok) return [];
+
+        var data = JSON.parse(text);
+        var sources = data && data.sources ? data.sources : {};
+        var streams = [];
+
+        Object.keys(sources).forEach(function (key) {
+            var s = sources[key];
+            if (!s || !s.url) return;
+            streams.push({
+                name: "Vidora",
+                title: (s.server || key) + " " + (s.label || "AUTO") + (s.type ? " (" + s.type + ")" : ""),
+                         url: s.url,
+                         quality: s.label && s.label !== "AUTO" ? s.label : "Auto",
+                         headers: { "Referer": BASE + "/", "Origin": BASE, "User-Agent": UA }
+            });
+        });
+
+        console.log("[Vidora] returning " + streams.length + " stream(s)");
+        return streams;
     } catch (err) {
         console.log("[Vidora] error: " + err);
         return [];
